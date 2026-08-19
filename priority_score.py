@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from time import time
+import re
 
 from aqt import mw
 from aqt.utils import showText
+from anki.utils import strip_html
 
 
 @dataclass
@@ -42,23 +44,31 @@ def calculate_priority_cards(limit=20):
     rows = mw.col.db.all(
         """
         SELECT
-            cid,
+            revlog.cid,
             COUNT(*) AS reviews,
             SUM(
                 CASE
-                    WHEN ease = 1 THEN 1
+                    WHEN revlog.ease = 1 THEN 1
                     ELSE 0
                 END
             ) AS again_count,
             SUM(
                 CASE
-                    WHEN ease = 1 AND id >= ? THEN 1
+                    WHEN revlog.ease = 1
+                    AND revlog.id >= ?
+                    THEN 1
                     ELSE 0
                 END
             ) AS recent_again
         FROM revlog
-        WHERE ease > 0
-        GROUP BY cid
+
+        INNER JOIN cards
+            ON cards.id = revlog.cid
+
+        WHERE revlog.ease > 0
+
+        GROUP BY revlog.cid
+
         HAVING COUNT(*) >= 3
         """,
         thirty_days_ago,
@@ -98,24 +108,32 @@ def calculate_priority_cards(limit=20):
 
 
 def get_card_question(card_id):
-    try:
-        card = mw.col.get_card(card_id)
-        question = card.question()
+    card = mw.col.get_card(card_id)
 
-        question = (
-            question
-            .replace("<br>", " ")
-            .replace("<br/>", " ")
-            .replace("<br />", " ")
-        )
+    question = card.question()
 
-        if len(question) > 120:
-            question = question[:120] + "..."
+    # CSS entfernen
+    question = re.sub(
+        r"<style.*?>.*?</style>",
+        "",
+        question,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
 
-        return question
+    # HTML-Tags entfernen
+    question = strip_html(question)
 
-    except Exception:
-        return "[Karte konnte nicht geladen werden]"
+    # überflüssige Leerzeichen entfernen
+    question = re.sub(
+        r"\s+",
+        " ",
+        question,
+    ).strip()
+
+    if len(question) > 120:
+        question = question[:120] + "..."
+
+    return question
 
 
 def show_priority_cards():
@@ -127,44 +145,19 @@ def show_priority_cards():
         )
         return
 
-    html = """
-    <h1>🩺 AnkiMed</h1>
-    <h2>🔥 Priority Cards</h2>
-
-    <p>
-        Ranking deiner aktuell problematischsten Karten.
-    </p>
-
-    <table cellpadding="7" cellspacing="0">
-        <tr>
-            <th>#</th>
-            <th>Score</th>
-            <th>Level</th>
-            <th>Karte</th>
-            <th>Reviews</th>
-            <th>Again</th>
-            <th>Again-Rate</th>
-            <th>Again 30d</th>
-        </tr>
-    """
+    text = "ANKIMED – PRIORITY CARDS\n\n"
 
     for position, card in enumerate(cards, start=1):
         question = get_card_question(card.card_id)
         level = get_priority_level(card.score)
 
-        html += f"""
-        <tr>
-            <td>{position}</td>
-            <td><b>{card.score:.1f}</b></td>
-            <td>{level}</td>
-            <td>{question}</td>
-            <td>{card.reviews}</td>
-            <td>{card.again_count}</td>
-            <td>{card.again_rate:.0%}</td>
-            <td>{card.recent_again}</td>
-        </tr>
-        """
+        text += (
+            f"{position}. {level} – Score {card.score:.1f}\n"
+            f"{question}\n"
+            f"Reviews: {card.reviews} | "
+            f"Again: {card.again_count} | "
+            f"Again-Rate: {card.again_rate:.0%} | "
+            f"Again 30d: {card.recent_again}\n\n"
+        )
 
-    html += "</table>"
-
-    showText(html)
+    showText(text)
