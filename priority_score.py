@@ -1,10 +1,8 @@
 from dataclasses import dataclass
 from time import time
-import re
 
 from aqt import mw
 from aqt.utils import showText
-from anki.utils import strip_html
 
 
 @dataclass
@@ -36,13 +34,33 @@ def get_priority_level(score):
         return "LOW"
 
 
+def get_ankiphil_deck_ids():
+    deck_ids = []
+
+    for deck in mw.col.decks.all():
+        deck_name = deck["name"]
+
+        if deck_name.startswith("Ankiphil"):
+            deck_ids.append(deck["id"])
+
+    return deck_ids
+
+
 def calculate_priority_cards(limit=20):
     thirty_days_ago = int(
         (time() - 30 * 24 * 60 * 60) * 1000
     )
 
-    rows = mw.col.db.all(
-        """
+    ankiphil_deck_ids = get_ankiphil_deck_ids()
+
+    if not ankiphil_deck_ids:
+        return []
+
+    placeholders = ",".join(
+        ["?"] * len(ankiphil_deck_ids)
+    )
+
+    query = f"""
         SELECT
             revlog.cid,
             COUNT(*) AS reviews,
@@ -65,13 +83,23 @@ def calculate_priority_cards(limit=20):
         INNER JOIN cards
             ON cards.id = revlog.cid
 
-        WHERE revlog.ease > 0
+        WHERE
+            revlog.ease > 0
+            AND cards.did IN ({placeholders})
 
         GROUP BY revlog.cid
 
         HAVING COUNT(*) >= 3
-        """,
+    """
+
+    parameters = [
         thirty_days_ago,
+        *ankiphil_deck_ids,
+    ]
+
+    rows = mw.col.db.all(
+        query,
+        *parameters,
     )
 
     results = []
@@ -107,33 +135,36 @@ def calculate_priority_cards(limit=20):
     return results[:limit]
 
 
-def get_card_question(card_id):
-    card = mw.col.get_card(card_id)
+def get_card_text(card_id):
+    try:
+        card = mw.col.get_card(card_id)
+        note = card.note()
 
-    question = card.question()
+        preferred_fields = [
+            "Frage",
+            "Question",
+            "Text",
+            "Vorderseite",
+            "Front",
+        ]
 
-    # CSS entfernen
-    question = re.sub(
-        r"<style.*?>.*?</style>",
-        "",
-        question,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
+        for field_name in preferred_fields:
+            if field_name in note:
+                value = note[field_name].strip()
 
-    # HTML-Tags entfernen
-    question = strip_html(question)
+                if value:
+                    return value[:160]
 
-    # überflüssige Leerzeichen entfernen
-    question = re.sub(
-        r"\s+",
-        " ",
-        question,
-    ).strip()
+        for value in note.values():
+            value = value.strip()
 
-    if len(question) > 120:
-        question = question[:120] + "..."
+            if value:
+                return value[:160]
 
-    return question
+        return "[Kein sinnvoller Kartentext gefunden]"
+
+    except Exception:
+        return "[Karte konnte nicht geladen werden]"
 
 
 def show_priority_cards():
@@ -141,19 +172,19 @@ def show_priority_cards():
 
     if not cards:
         showText(
-            "AnkiMed konnte noch keine geeigneten Review-Daten finden."
+            "AnkiMed konnte keine Ankiphil-Karten mit geeigneten Review-Daten finden."
         )
         return
 
-    text = "ANKIMED – PRIORITY CARDS\n\n"
+    text = "ANKIMED – ANKIPHIL PRIORITY CARDS\n\n"
 
     for position, card in enumerate(cards, start=1):
-        question = get_card_question(card.card_id)
+        card_text = get_card_text(card.card_id)
         level = get_priority_level(card.score)
 
         text += (
             f"{position}. {level} – Score {card.score:.1f}\n"
-            f"{question}\n"
+            f"{card_text}\n"
             f"Reviews: {card.reviews} | "
             f"Again: {card.again_count} | "
             f"Again-Rate: {card.again_rate:.0%} | "
