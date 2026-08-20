@@ -1,0 +1,141 @@
+from collections import defaultdict
+from dataclasses import dataclass
+import re
+from time import time
+
+from aqt import mw
+from aqt.utils import showText
+
+from .priority_score import get_ankiphil_deck_ids
+
+
+RECENT_DAYS = 30
+MIN_REVIEWS_PER_CARD = 3
+
+# Technical/import/organisation tags that do not describe medical knowledge.
+NOISE_PARTS = {
+    "ankiphil", "ak", "amboss", "anki", "bws", "card", "cards", "cloze",
+    "deck", "decks", "dope", "exam", "fa", "flag", "highyield", "image",
+    "import", "karte", "karten", "lowyield", "markiert", "metadata", "m2",
+    "notetype", "original", "semester", "source", "tag", "tags", "version",
+    "vorklinik", "yield", "zankiphil",
+}
+NOISE_PATTERNS = (
+    re.compile(r"^\d+$"),
+    re.compile(r"^v?\d+(?:[._-]\d+)*$", re.IGNORECASE),
+    re.compile(r"^[0-9a-f]{8,}$", re.IGNORECASE),
+    re.compile(r"^(?:20)?\d{2}[-_.]\d{1,2}(?:[-_.]\d{1,2})?$"),
+)
+
+
+@dataclass
+class WeaknessTopic:
+    topic: str
+    cards: int
+    reviews: int
+    again_count: int
+    recent_again: int
+    weakness_score: float
+
+    @property
+    def again_rate(self):
+        return self.again_count / self.reviews if self.reviews else 0.0
+
+
+def _display_name(value):
+    value = re.sub(r"[_-]+", " ", value).strip()
+    return value[:1].upper() + value[1:] if value else value
+
+
+def _meaningful_topic(tag):
+    """Return the most specific readable topic in a hierarchical note tag."""
+    parts = [part.strip() for part in tag.split("::") if part.strip()]
+    candidates = []
+    for part in parts:
+        normalized = re.sub(r"[^\wäöüÄÖÜß-]+", "", part).casefold()
+        if len(normalized) < 3 or normalized in NOISE_PARTS:
+            continue
+        if any(pattern.fullmatch(normalized) for pattern in NOISE_PATTERNS):
+            continue
+        candidates.append(part)
+    return _display_name(candidates[-1]) if candidates else None
+
+
+def _card_review_rows():
+    deck_ids = get_ankiphil_deck_ids()
+    if not deck_ids:
+        return []
+    placeholders = ",".join(["?"] * len(deck_ids))
+    recent_cutoff = int((time() - RECENT_DAYS * 86400) * 1000)
+    return mw.col.db.all(
+        f"""
+        SELECT cards.nid, revlog.cid, COUNT(*),
+               SUM(CASE WHEN revlog.ease = 1 THEN 1 ELSE 0 END),
+               SUM(CASE WHEN revlog.ease = 1 AND revlog.id >= ? THEN 1 ELSE 0 END)
+        FROM revlog
+        INNER JOIN cards ON cards.id = revlog.cid
+        WHERE revlog.ease > 0
+          AND (CASE WHEN cards.odid != 0 THEN cards.odid ELSE cards.did END)
+              IN ({placeholders})
+        GROUP BY revlog.cid
+        HAVING COUNT(*) >= ?
+        """,
+        recent_cutoff,
+        *deck_ids,
+        MIN_REVIEWS_PER_CARD,
+    )
+
+
+def calculate_weakness_topics(limit=10):
+    aggregates = defaultdict(lambda: {"card_ids": set(), "reviews": 0, "again": 0, "recent": 0})
+    for note_id, card_id, reviews, again_count, recent_again in _card_review_rows():
+        note = mw.col.get_note(note_id)
+        topics = {_meaningful_topic(tag) for tag in note.tags}
+        topics.discard(None)
+        for topic in topics:
+            item = aggregates[topic]
+            item["card_ids"].add(card_id)
+            item["reviews"] += reviews
+            item["again"] += again_count or 0
+            item["recent"] += recent_again or 0
+
+    results = []
+    for topic, data in aggregates.items():
+        reviews = data["reviews"]
+        rate = data["again"] / reviews if reviews else 0.0
+        # Rate is central; repeated and recent failures add urgency without allowing
+        # huge topics to dominate purely because they contain more cards.
+        score = rate * 70 + min(data["again"], 10) * 2 + min(data["recent"], 6) * 3
+        results.append(
+            WeaknessTopic(topic, len(data["card_ids"]), reviews, data["again"], data["recent"], score)
+        )
+    results.sort(key=lambda item: (item.weakness_score, item.reviews), reverse=True)
+    return results[:limit]
+
+
+def get_weakness_summary(limit=3):
+    topics = calculate_weakness_topics(limit=limit)
+    if not topics:
+        return "Noch keine auswertbaren Themen gefunden."
+    return " • ".join(f"{item.topic} ({item.again_rate:.0%} Again)" for item in topics)
+
+
+def show_weakness_radar():
+    topics = calculate_weakness_topics(limit=15)
+    if not topics:
+        showText(
+            "AnkiMed konnte keine auswertbaren Ankiphil-Themen finden.\n\n"
+            "Benötigt werden Notiz-Tags und mindestens drei Reviews pro Karte."
+        )
+        return
+    lines = ["ANKIMED – WEAKNESS RADAR", "", "Schwächste Themen nach deinen Ankiphil-Reviews:", ""]
+    for position, item in enumerate(topics, start=1):
+        lines.extend(
+            [
+                f"{position}. {item.topic} – Score {item.weakness_score:.1f}",
+                f"   {item.cards} Karten | {item.reviews} Reviews | "
+                f"Again {item.again_count} ({item.again_rate:.0%}) | Again 30d {item.recent_again}",
+                "",
+            ]
+        )
+    showText("\n".join(lines))
