@@ -8,9 +8,6 @@ from aqt import mw
 from aqt.utils import showText
 
 
-# ---------------------------------------------------------
-# Datenstruktur
-# ---------------------------------------------------------
 
 @dataclass
 class CardPriority:
@@ -95,7 +92,7 @@ def clean_card_text(text):
 
 
 # ---------------------------------------------------------
-# Ankiphil-Decks finden
+# Auf Ankiphil-Decks begrenzen
 # ---------------------------------------------------------
 
 def get_ankiphil_deck_ids():
@@ -334,7 +331,7 @@ def show_priority_cards():
 
 
 # ---------------------------------------------------------
-# Suchstring für Priority Cards erstellen
+# Suchstring für Priority Cards 
 # ---------------------------------------------------------
 
 def get_priority_search(limit=20):
@@ -381,4 +378,20 @@ def open_priority_cards_in_browser():
         "Browser",
         mw,
         search=(search,),
+    )
+
+def start_priority_session():
+    search = get_priority_search(limit=20)
+
+    if not search:
+        showText(
+            "AnkiMed konnte keine Priority Cards finden."
+        )
+        return
+
+    from aqt.filtered_deck import FilteredDeckConfigDialog
+
+    FilteredDeckConfigDialog(
+        mw,
+        search=search,
     )
