@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from time import time
+
 import html
 import re
 import aqt
@@ -8,6 +9,9 @@ from aqt import mw
 from aqt.utils import showText
 
 
+# =========================================================
+# Datenstruktur
+# =========================================================
 
 @dataclass
 class CardPriority:
@@ -19,36 +23,63 @@ class CardPriority:
     score: float
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Priority Score
-# ---------------------------------------------------------
+# =========================================================
 
-def calculate_score(again_rate, again_count, recent_again):
-    return (
+def calculate_score(
+    again_rate,
+    again_count,
+    recent_again,
+):
+    """
+    Berechnet den Priority Score einer Karte.
+
+    Aktuelle Formel:
+
+    Again-Rate × 60
+    + Anzahl Again × 3
+    + Again in letzten 30 Tagen × 5
+    """
+
+    score = (
         again_rate * 60
         + again_count * 3
         + recent_again * 5
     )
 
+    return score
+
 
 def get_priority_level(score):
+    """
+    Ordnet den Priority Score einer Kategorie zu.
+    """
+
     if score >= 80:
         return "CRITICAL"
+
     elif score >= 60:
         return "HIGH"
+
     elif score >= 40:
         return "MEDIUM"
+
     else:
         return "LOW"
 
 
-# ---------------------------------------------------------
-# Kartentext bereinigen
-# ---------------------------------------------------------
+# =========================================================
+# Kartentext aufräumen
+# =========================================================
 
 def clean_card_text(text):
+    """
+    Entfernt HTML und Cloze-Syntax aus Ankiphil-Karten,
+    damit der Text in AnkiMed lesbar dargestellt wird.
+    """
 
-    # <br>, <br/> usw. in Leerzeichen umwandeln
+    # HTML-Zeilenumbrüche ersetzen
     text = re.sub(
         r"<br\s*/?>",
         " ",
@@ -64,13 +95,21 @@ def clean_card_text(text):
     )
 
     # HTML-Sonderzeichen zurückwandeln
-    # Beispiel: &gt; → >
+    #
+    # z.B.
+    # &gt; -> >
+    # &lt; -> <
+    #
     text = html.unescape(text)
 
-    # Cloze-Syntax lesbar machen
-    # Beispiel:
+    # Cloze-Syntax entfernen
+    #
+    # {{c1::Praziquantel}}
+    # -> Praziquantel
+    #
     # {{c1::Praziquantel::Therapie}}
-    # → Praziquantel
+    # -> Praziquantel
+    #
     text = re.sub(
         r"\{\{c\d+::(.*?)(?:::[^}]*)?\}\}",
         r"\1",
@@ -84,18 +123,25 @@ def clean_card_text(text):
         text,
     ).strip()
 
-    # Text für Übersicht kürzen
+    # für Übersicht kürzen
     if len(text) > 180:
-        text = text[:180] + "..."
+        text = (
+            text[:180]
+            + "..."
+        )
 
     return text
 
 
-# ---------------------------------------------------------
-# Auf Ankiphil-Decks begrenzen
-# ---------------------------------------------------------
+# =========================================================
+# Ankiphil Decks finden
+# =========================================================
 
 def get_ankiphil_deck_ids():
+    """
+    Sucht alle Decks, deren Name mit 'Ankiphil'
+    beginnt.
+    """
 
     deck_ids = []
 
@@ -104,39 +150,63 @@ def get_ankiphil_deck_ids():
         deck_name = deck["name"]
 
         if deck_name.startswith("Ankiphil"):
-            deck_ids.append(deck["id"])
+
+            deck_ids.append(
+                deck["id"]
+            )
 
     return deck_ids
 
 
-# ---------------------------------------------------------
-# Karten analysieren
-# ---------------------------------------------------------
+# =========================================================
+# Priority Cards berechnen
+# =========================================================
 
-def calculate_priority_cards(limit=20):
+def calculate_priority_cards(
+    limit=20,
+):
+    """
+    Analysiert die Review-Historie aller Ankiphil-Karten
+    und gibt die Karten mit den höchsten Priority Scores
+    zurück.
+    """
 
     # Zeitpunkt vor 30 Tagen
-    # revlog.id arbeitet mit Millisekunden
+    #
+    # revlog.id verwendet Millisekunden
+    #
     thirty_days_ago = int(
-        (time() - 30 * 24 * 60 * 60) * 1000
+        (
+            time()
+            - 30
+            * 24
+            * 60
+            * 60
+        )
+        * 1000
     )
 
-    ankiphil_deck_ids = get_ankiphil_deck_ids()
+    ankiphil_deck_ids = (
+        get_ankiphil_deck_ids()
+    )
 
     if not ankiphil_deck_ids:
         return []
 
-    # Für SQL entsteht z.B.:
+    # SQL-Platzhalter erstellen
     #
-    # ?, ?, ?, ?
+    # z.B.
     #
-    # je nachdem, wie viele Ankiphil-Decks gefunden wurden
+    # ?,?,?
+    #
     placeholders = ",".join(
-        ["?"] * len(ankiphil_deck_ids)
+        ["?"]
+        * len(ankiphil_deck_ids)
     )
 
     query = f"""
         SELECT
+
             revlog.cid,
 
             COUNT(*) AS reviews,
@@ -165,7 +235,9 @@ def calculate_priority_cards(limit=20):
 
         WHERE
             revlog.ease > 0
-            AND cards.did IN ({placeholders})
+
+            AND cards.did
+            IN ({placeholders})
 
         GROUP BY
             revlog.cid
@@ -186,6 +258,10 @@ def calculate_priority_cards(limit=20):
 
     results = []
 
+    # =====================================================
+    # Jede Karte einzeln auswerten
+    # =====================================================
+
     for (
         card_id,
         reviews,
@@ -193,11 +269,19 @@ def calculate_priority_cards(limit=20):
         recent_again,
     ) in rows:
 
-        again_count = again_count or 0
-        recent_again = recent_again or 0
+        again_count = (
+            again_count
+            or 0
+        )
+
+        recent_again = (
+            recent_again
+            or 0
+        )
 
         again_rate = (
-            again_count / reviews
+            again_count
+            / reviews
         )
 
         score = calculate_score(
@@ -206,7 +290,7 @@ def calculate_priority_cards(limit=20):
             recent_again,
         )
 
-        card_priority = CardPriority(
+        priority_card = CardPriority(
             card_id=card_id,
             reviews=reviews,
             again_count=again_count,
@@ -216,10 +300,13 @@ def calculate_priority_cards(limit=20):
         )
 
         results.append(
-            card_priority
+            priority_card
         )
 
-    # Höchster Priority Score zuerst
+    # =====================================================
+    # Sortieren
+    # =====================================================
+
     results.sort(
         key=lambda card: card.score,
         reverse=True,
@@ -228,15 +315,20 @@ def calculate_priority_cards(limit=20):
     return results[:limit]
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Kartentext holen
-# ---------------------------------------------------------
+# =========================================================
 
 def get_card_text(card_id):
+    """
+    Holt einen sinnvollen Text aus der Note der Karte.
+    """
 
     try:
 
-        card = mw.col.get_card(card_id)
+        card = mw.col.get_card(
+            card_id
+        )
 
         note = card.note()
 
@@ -248,54 +340,77 @@ def get_card_text(card_id):
             "Front",
         ]
 
-        # Erst nach typischen Fragefeldern suchen
+        # -------------------------------------------------
+        # zuerst typische Fragefelder versuchen
+        # -------------------------------------------------
+
         for field_name in preferred_fields:
 
             if field_name in note:
 
-                value = note[field_name].strip()
+                value = (
+                    note[field_name]
+                    .strip()
+                )
 
                 if value:
-                    return clean_card_text(value)
 
-        # Falls diese Feldnamen nicht existieren:
-        # erstes nicht-leeres Feld verwenden
+                    return clean_card_text(
+                        value
+                    )
+
+        # -------------------------------------------------
+        # ansonsten erstes sinnvolles Feld
+        # -------------------------------------------------
+
         for value in note.values():
 
             value = value.strip()
 
             if value:
-                return clean_card_text(value)
 
-        return "[Kein sinnvoller Kartentext gefunden]"
+                return clean_card_text(
+                    value
+                )
+
+        return (
+            "[Kein sinnvoller "
+            "Kartentext gefunden]"
+        )
 
     except Exception:
 
-        return "[Karte konnte nicht geladen werden]"
+        return (
+            "[Karte konnte "
+            "nicht geladen werden]"
+        )
 
 
-# ---------------------------------------------------------
-# Priority Cards anzeigen
-# ---------------------------------------------------------
+# =========================================================
+# Priority Score anzeigen
+# =========================================================
 
 def show_priority_cards():
 
-    cards = calculate_priority_cards(
-        limit=20
+    cards = (
+        calculate_priority_cards(
+            limit=20
+        )
     )
 
     if not cards:
 
         showText(
-            "AnkiMed konnte keine Ankiphil-Karten "
-            "mit geeigneten Review-Daten finden."
+            "AnkiMed konnte keine "
+            "Ankiphil-Karten mit "
+            "geeigneten Review-Daten finden."
         )
 
         return
 
     text = (
-        "ANKIMED – ANKIPHIL PRIORITY CARDS\n"
-        "\n"
+        "ANKIMED – "
+        "ANKIPHIL PRIORITY CARDS\n\n"
     )
 
     for position, card in enumerate(
@@ -314,30 +429,50 @@ def show_priority_cards():
         text += (
             f"{position}. "
             f"{level} – "
-            f"Score {card.score:.1f}\n"
-            "\n"
-            f"{card_text}\n"
-            "\n"
-            f"Reviews: {card.reviews} | "
-            f"Again: {card.again_count} | "
+            f"Score {card.score:.1f}\n\n"
+
+            f"{card_text}\n\n"
+
+            f"Reviews: "
+            f"{card.reviews} | "
+
+            f"Again: "
+            f"{card.again_count} | "
+
             f"Again-Rate: "
             f"{card.again_rate:.0%} | "
+
             f"Again 30d: "
             f"{card.recent_again}"
+
             "\n\n"
         )
 
-    showText(text)
+    showText(
+        text
+    )
 
 
-# ---------------------------------------------------------
-# Suchstring für Priority Cards 
-# ---------------------------------------------------------
+# =========================================================
+# Suchstring erzeugen
+# =========================================================
 
-def get_priority_search(limit=20):
+def get_priority_search(
+    limit=20,
+):
+    """
+    Erstellt eine Anki-Suche aus den IDs
+    der Priority Cards.
 
-    cards = calculate_priority_cards(
-        limit=limit
+    Beispiel:
+
+    cid:123,456,789
+    """
+
+    cards = (
+        calculate_priority_cards(
+            limit=limit
+        )
     )
 
     if not cards:
@@ -356,9 +491,9 @@ def get_priority_search(limit=20):
     return search
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Priority Cards im Browser öffnen
-# ---------------------------------------------------------
+# =========================================================
 
 def open_priority_cards_in_browser():
 
@@ -369,7 +504,8 @@ def open_priority_cards_in_browser():
     if not search:
 
         showText(
-            "AnkiMed konnte keine Priority Cards finden."
+            "AnkiMed konnte keine "
+            "Priority Cards finden."
         )
 
         return
@@ -380,16 +516,29 @@ def open_priority_cards_in_browser():
         search=(search,),
     )
 
+
+# =========================================================
+# Priority Session starten
+# =========================================================
+
 def start_priority_session():
-    search = get_priority_search(limit=20)
+
+    search = get_priority_search(
+        limit=20
+    )
 
     if not search:
+
         showText(
-            "AnkiMed konnte keine Priority Cards finden."
+            "AnkiMed konnte keine "
+            "Priority Cards finden."
         )
+
         return
 
-    from aqt.filtered_deck import FilteredDeckConfigDialog
+    from aqt.filtered_deck import (
+        FilteredDeckConfigDialog
+    )
 
     FilteredDeckConfigDialog(
         mw,
