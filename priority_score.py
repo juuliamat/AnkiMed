@@ -192,3 +192,23 @@ def show_priority_cards():
         )
 
     showText(text)
+
+def open_priority_cards_in_browser():
+    cards = calculate_priority_cards(limit=20)
+
+    if not cards:
+        showText(
+            "AnkiMed konnte keine Priority Cards finden."
+        )
+        return
+
+    card_ids = [
+        str(card.card_id)
+        for card in cards
+    ]
+
+    search = "cid:" + ",".join(card_ids)
+
+    browser = mw.onBrowse()
+    browser.form.searchEdit.lineEdit().setText(search)
+    browser.onSearchActivated()
