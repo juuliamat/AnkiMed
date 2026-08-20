@@ -18,7 +18,8 @@ NOISE_PARTS = {
     "deck", "decks", "dope", "exam", "fa", "flag", "highyield", "image",
     "import", "karte", "karten", "lowyield", "markiert", "metadata", "m2",
     "notetype", "original", "semester", "source", "tag", "tags", "version",
-    "vorklinik", "yield", "zankiphil",
+    "vorklinik", "yield", "zankiphil", "hammer", "top100", "100tage",
+    "lerntag", "lerntage", "priorität", "priority",
 }
 NOISE_PATTERNS = (
     re.compile(r"^\d+$"),
@@ -47,18 +48,52 @@ def _display_name(value):
     return value[:1].upper() + value[1:] if value else value
 
 
-def _meaningful_topic(tag):
-    """Return the most specific readable topic in a hierarchical note tag."""
+MEDICAL_SUBJECTS = {
+    "allgemeinmedizin", "anästhesiologie", "anästhesie", "arbeitsmedizin",
+    "augenheilkunde", "chirurgie", "dermatologie", "endokrinologie",
+    "gastroenterologie", "geriatrie", "gynäkologie", "hämatologie und onkologie",
+    "hno", "hals nasen ohren heilkunde", "immunologie", "infektiologie",
+    "innere medizin", "intensivmedizin", "kardiologie", "kinderchirurgie",
+    "medizinische genetik", "nephrologie", "neurologie", "neurochirurgie",
+    "notfallmedizin", "nuklearmedizin", "onkologie", "orthopädie",
+    "pathologie", "pädiatrie", "pharmakologie", "pneumologie", "psychiatrie",
+    "psychosomatik", "radiologie", "rechtsmedizin", "rheumatologie",
+    "strahlentherapie", "urologie",
+}
+
+
+def _normalized(value):
+    return re.sub(r"[_!#-]+", " ", value).strip().casefold()
+
+
+def _meaningful_parts(tag):
     parts = [part.strip() for part in tag.split("::") if part.strip()]
     candidates = []
     for part in parts:
-        normalized = re.sub(r"[^\wäöüÄÖÜß-]+", "", part).casefold()
-        if len(normalized) < 3 or normalized in NOISE_PARTS:
+        normalized = _normalized(part)
+        compact = re.sub(r"[^\wäöüß]+", "", normalized)
+        if len(compact) < 3 or normalized in NOISE_PARTS or compact in NOISE_PARTS:
             continue
-        if any(pattern.fullmatch(normalized) for pattern in NOISE_PATTERNS):
+        if any(pattern.fullmatch(compact) for pattern in NOISE_PATTERNS):
             continue
         candidates.append(part)
-    return _display_name(candidates[-1]) if candidates else None
+    return candidates
+
+
+def _classify_tag(tag):
+    """Return a (subject, specific topic) pair from one hierarchical tag."""
+    parts = _meaningful_parts(tag)
+    if not parts:
+        return None, None
+
+    subject = next(
+        (_display_name(part) for part in parts if _normalized(part) in MEDICAL_SUBJECTS),
+        None,
+    )
+    topic = _display_name(parts[-1])
+    if subject and _normalized(topic) == _normalized(subject):
+        topic = None
+    return subject, topic
 
 
 def _card_review_rows():
@@ -86,50 +121,61 @@ def _card_review_rows():
     )
 
 
-def calculate_weakness_topics(limit=10):
+def _calculate_weakness(level, limit):
     aggregates = defaultdict(lambda: {"card_ids": set(), "reviews": 0, "again": 0, "recent": 0})
     for note_id, card_id, reviews, again_count, recent_again in _card_review_rows():
         note = mw.col.get_note(note_id)
-        topics = {_meaningful_topic(tag) for tag in note.tags}
-        topics.discard(None)
-        for topic in topics:
-            item = aggregates[topic]
+        values = set()
+        for tag in note.tags:
+            subject, topic = _classify_tag(tag)
+            value = subject if level == "subject" else topic
+            if value:
+                values.add(value)
+        for value in values:
+            item = aggregates[value]
             item["card_ids"].add(card_id)
             item["reviews"] += reviews
             item["again"] += again_count or 0
             item["recent"] += recent_again or 0
 
     results = []
-    for topic, data in aggregates.items():
+    for value, data in aggregates.items():
         reviews = data["reviews"]
         rate = data["again"] / reviews if reviews else 0.0
         # Rate is central; repeated and recent failures add urgency without allowing
         # huge topics to dominate purely because they contain more cards.
         score = rate * 70 + min(data["again"], 10) * 2 + min(data["recent"], 6) * 3
         results.append(
-            WeaknessTopic(topic, len(data["card_ids"]), reviews, data["again"], data["recent"], score)
+            WeaknessTopic(value, len(data["card_ids"]), reviews, data["again"], data["recent"], score)
         )
     results.sort(key=lambda item: (item.weakness_score, item.reviews), reverse=True)
     return results[:limit]
 
 
+def calculate_weakness_subjects(limit=10):
+    return _calculate_weakness("subject", limit)
+
+
+def calculate_weakness_topics(limit=10):
+    return _calculate_weakness("topic", limit)
+
+
 def get_weakness_summary(limit=3):
+    subjects = calculate_weakness_subjects(limit=limit)
     topics = calculate_weakness_topics(limit=limit)
-    if not topics:
+    if not subjects and not topics:
         return "Noch keine auswertbaren Themen gefunden."
-    return " • ".join(f"{item.topic} ({item.again_rate:.0%} Again)" for item in topics)
+    lines = []
+    if subjects:
+        lines.append("Fächer: " + " • ".join(item.topic for item in subjects))
+    if topics:
+        lines.append("Themen: " + " • ".join(item.topic for item in topics))
+    return "\n".join(lines)
 
 
-def show_weakness_radar():
-    topics = calculate_weakness_topics(limit=15)
-    if not topics:
-        showText(
-            "AnkiMed konnte keine auswertbaren Ankiphil-Themen finden.\n\n"
-            "Benötigt werden Notiz-Tags und mindestens drei Reviews pro Karte."
-        )
-        return
-    lines = ["ANKIMED – WEAKNESS RADAR", "", "Schwächste Themen nach deinen Ankiphil-Reviews:", ""]
-    for position, item in enumerate(topics, start=1):
+def _ranking_lines(items):
+    lines = []
+    for position, item in enumerate(items, start=1):
         lines.extend(
             [
                 f"{position}. {item.topic} – Score {item.weakness_score:.1f}",
@@ -138,4 +184,23 @@ def show_weakness_radar():
                 "",
             ]
         )
+    return lines
+
+
+def show_weakness_radar():
+    subjects = calculate_weakness_subjects(limit=10)
+    topics = calculate_weakness_topics(limit=15)
+    if not subjects and not topics:
+        showText(
+            "AnkiMed konnte keine auswertbaren Ankiphil-Themen finden.\n\n"
+            "Benötigt werden Notiz-Tags und mindestens drei Reviews pro Karte."
+        )
+        return
+    lines = ["ANKIMED – WEAKNESS RADAR", ""]
+    if subjects:
+        lines.extend(["SCHWÄCHSTE FACHGEBIETE", ""])
+        lines.extend(_ranking_lines(subjects))
+    if topics:
+        lines.extend(["SCHWÄCHSTE KONKRETE THEMEN", ""])
+        lines.extend(_ranking_lines(topics))
     showText("\n".join(lines))
